@@ -471,7 +471,22 @@ function suggestSpot(em){
   const top=Object.entries(best).filter(([id])=>S.spots.find(s=>s.id===id)).sort((a,b)=>b[1]-a[1])[0];
   return top?{id:top[0],score:top[1]}:null;
 }
-let suggestedId=null;
+let suggestedId=null, hereId=null;
+/* GPS (home-screen version only — the Claude app blocks location) */
+const CAN_GPS=!IN_CLAUDE&&'geolocation' in navigator;
+function locate(){return new Promise(r=>{if(!CAN_GPS)return r(null);
+  navigator.geolocation.getCurrentPosition(p=>r(p.coords),()=>r(null),{enableHighAccuracy:true,timeout:10000,maximumAge:60000});});}
+function dist(a,b){const R=6371e3,t=x=>x*Math.PI/180,dLa=t(b.lat-a.latitude),dLo=t(b.lng-a.longitude);
+  const h=Math.sin(dLa/2)**2+Math.cos(t(a.latitude))*Math.cos(t(b.lat))*Math.sin(dLo/2)**2;return 2*R*Math.asin(Math.sqrt(h));}
+function nearestSpot(c){let best=null;S.spots.forEach(s=>{if(s.lat==null)return;const d=dist(c,s);if(d<=Math.max(150,Math.min(c.accuracy||0,400))&&(!best||d<best.d))best={s,d};});return best;}
+async function findMySpot(manual){
+  const c=await locate();
+  if(!c){if(manual)toast('Location is off. Allow it in Settings → Safari → Location.');return;}
+  const n=nearestSpot(c);
+  if(!n){hereId=null;if(manual)toast('No saved spot near you. Save this one below.');renderSpots();return;}
+  hereId=n.s.id;S.em=n.s.em;$('zone').value='';spotId=null;useSpot(n.s);renderPay();
+  toast(`You're at ${n.s.name}`);
+}
 function useSpot(s){
   spotId=s.id;
   if(s.em==='dxb')$('zone').value=s.zone||'';
@@ -484,9 +499,11 @@ function applySuggestion(){
 }
 function renderSpots(){
   const list=S.spots.filter(s=>s.em===S.em);
-  $('spots').innerHTML=list.length?list.map(s=>`<button type="button" class="spot" data-id="${s.id}" aria-pressed="${spotId===s.id}">${suggestedId===s.id?'<span class="sug">Suggested now</span>':''}<b>${esc(s.name)}</b><span>${S.em==='dxb'?esc(s.zone):S.em==='auh'?(s.type==='P'?'Premium':'Standard'):''}${s.hours?` · ${s.hours}h`:''}</span></button>`).join('')
-    :`<p class="hint" style="margin:0">Save the places you park often. After a few visits the app pre-selects the right one for the time of day.</p>`;
-  $('spots').querySelectorAll('.spot').forEach(b=>b.onclick=()=>{
+  const gpsBtn=CAN_GPS&&S.spots.some(s=>s.lat!=null)?`<button type="button" class="spot" id="findMe"><span class="sug">Location</span><b>Find my spot</b><span>Uses GPS</span></button>`:'';
+  $('spots').innerHTML=gpsBtn+(list.length?list.map(s=>`<button type="button" class="spot" data-id="${s.id}" aria-pressed="${spotId===s.id}">${hereId===s.id?'<span class="sug">You’re here</span>':suggestedId===s.id?'<span class="sug">Suggested now</span>':''}<b>${esc(s.name)}</b><span>${S.em==='dxb'?esc(s.zone):S.em==='auh'?(s.type==='P'?'Premium':'Standard'):''}${s.hours?` · ${s.hours}h`:''}</span></button>`).join('')
+    :`<p class="hint" style="margin:0">Save the places you park often. ${CAN_GPS?'Each spot remembers its location, so next time the app picks it as soon as you open it there.':'After a few visits the app pre-selects the right one for the time of day.'}</p>`);
+  const fm=$('findMe');if(fm)fm.onclick=()=>findMySpot(true);
+  $('spots').querySelectorAll('.spot[data-id]').forEach(b=>b.onclick=()=>{
     const s=S.spots.find(x=>x.id===b.dataset.id);
     if(spotId===s.id){spotId=null;}else useSpot(s);
     renderSpots();renderHours();renderReady();
@@ -498,14 +515,17 @@ function renderSpots(){
   if(cur){
     const del=$('spotDel');
     del.onclick=()=>{if(del.dataset.arm){S.spots=S.spots.filter(s=>s.id!==cur.id);spotId=null;save();renderSpots();toast('Spot removed');return;}del.dataset.arm='1';del.textContent='Tap again to remove';setTimeout(()=>{if(del.isConnected){delete del.dataset.arm;del.textContent=`Remove “${cur.name}”`;}},3000);};
-    $('spotUpd').onclick=()=>{if(S.em==='dxb'&&!$('zone').value.trim()){toast('Enter the zone code first');return;}cur.zone=$('zone').value.trim();cur.type=ptype;cur.hours=hours;save();renderSpots();toast('Spot updated');};
+    $('spotUpd').onclick=async()=>{if(S.em==='dxb'&&!$('zone').value.trim()){toast('Enter the zone code first');return;}cur.zone=$('zone').value.trim();cur.type=ptype;cur.hours=hours;
+      const c=await locate();if(c){cur.lat=c.latitude;cur.lng=c.longitude;}
+      save();renderSpots();toast(c?'Spot updated with your current location':'Spot updated');};
   }else{
-    $('spotSave').onclick=()=>{
+    $('spotSave').onclick=async()=>{
       const name=$('spotName').value.trim();
       if(!name){toast('Give the spot a name');$('spotName').focus();return;}
       if(S.em==='dxb'&&!$('zone').value.trim()){toast('Enter the zone code first');$('zone').focus();return;}
       const s={id:uid(),em:S.em,name,zone:$('zone').value.trim(),type:ptype,hours};
-      S.spots.push(s);spotId=s.id;save();renderSpots();toast(`${name} saved`);
+      const c=await locate();if(c){s.lat=c.latitude;s.lng=c.longitude;hereId=s.id;}
+      S.spots.push(s);spotId=s.id;save();renderSpots();toast(c?`${name} saved with this location`:`${name} saved`);
     };
   }
 }
@@ -585,6 +605,20 @@ function logSession(v,body){
   setTimeout(()=>toast(IN_CLAUDE?'Copied. Paste in Messages to '+e.to+'. Timer started.':'Timer started. Check for the confirmation SMS.'),60);
 }
 
+/* Calendar reminder: an event at expiry with an alert 10 min before (opens iPhone's "Add to Calendar") */
+function addReminder(h){
+  const f=d=>new Date(d).toISOString().replace(/[-:]/g,'').replace(/\.\d{3}/,'');
+  const x=EM[h.em].ext(h), place=EM[h.em].name+(h.zone?' '+h.zone:'');
+  const ics=['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//UAE Park//EN','BEGIN:VEVENT',
+    `UID:${h.id}-${h.ends}@uaepark`,`DTSTAMP:${f(Date.now())}`,`DTSTART:${f(h.ends)}`,`DTEND:${f(h.ends+5*60e3)}`,
+    `SUMMARY:Parking ends · ${h.nick} (${place})`,
+    `DESCRIPTION:To add 1 hour send "${x.body}" to ${x.to}.`,
+    'BEGIN:VALARM','ACTION:DISPLAY','DESCRIPTION:Parking ends in 10 minutes','TRIGGER:-PT10M','END:VALARM',
+    'BEGIN:VALARM','ACTION:DISPLAY','DESCRIPTION:Parking ends now','TRIGGER:PT0M','END:VALARM',
+    'END:VEVENT','END:VCALENDAR'].join('\r\n');
+  location.href='data:text/calendar;charset=utf-8,'+encodeURIComponent(ics);
+}
+
 function fmtLeft(ms){
   const neg=ms<0;ms=Math.abs(ms);const m=Math.floor(ms/60000),s=Math.floor(ms/1000)%60;
   const hh=Math.floor(m/60),mm=m%60;
@@ -603,6 +637,7 @@ function renderActive(){
       <div class="left" data-left>${fmtLeft(left)}<small>left</small></div>
       <div class="actions">
         <a class="btn small primary ext" href="${smsHref(x.to,x.body)}" style="flex:0 1 auto">${x.label}</a>
+        ${IN_CLAUDE?'':'<button class="btn small cal" type="button">Remind me</button>'}
         <button class="btn small done" type="button">I've left</button>
       </div></div>`;}).join('');
   box.querySelectorAll('.timer').forEach(t=>{
@@ -611,6 +646,7 @@ function renderActive(){
       const add=quote(h.em,{h:1,zone:h.zone,type:h.type||'S'},new Date(h.ends));
       h.amt=(h.amt||0)+(add.amt||0)+SMS_FEE[h.em];
       h.ends=Math.max(h.ends,Date.now())+3600e3;h.hours+=1;save();setTimeout(renderActive,50);toast('Added 1 hour to the timer');};
+    const cal=t.querySelector('.cal');if(cal)cal.onclick=()=>addReminder(h);
     t.querySelector('.done').onclick=()=>{h.done=true;h.left=Date.now();save();renderActive();};
   });
 }
@@ -689,6 +725,11 @@ $('clearHis').onclick=function(){
   applySuggestion();
 })();
 renderPrev();renderVehicles();renderPay();setStore(storeState);connectCloud();
+// home-screen version: if location was allowed before, jump straight to the spot you're standing at
+if(CAN_GPS&&S.spots.some(s=>s.lat!=null)){
+  (navigator.permissions&&navigator.permissions.query?navigator.permissions.query({name:'geolocation'}).then(p=>p.state).catch(()=>'prompt'):Promise.resolve('prompt'))
+    .then(st=>{if(st==='granted')findMySpot(false);});
+}
 try{const t=localStorage.getItem(KEY+'.tab');if(t&&t!=='pay')showTab(t);}catch(e){}
 </script>
 
